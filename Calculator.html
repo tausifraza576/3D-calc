@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Over-Engineered 3D Scientific Calculator</title>
+<style>
+:root{--bg:#0a0a0a;--body:#1b1640;--key:#2c2566;--fn:#4a2f8f;--op:#ff9f1c;--eq:#2ec4b6;--txt:#f4f0ff;box-sizing:border-box}
+*,*::before,*::after{box-sizing:inherit}
+html,body{height:100%;margin:0}
+body{display:grid;place-items:center;background:radial-gradient(circle at 50% 30%,#2a1c63,var(--bg) 70%);color:var(--txt);font:600 16px/1.2 system-ui,sans-serif;overflow:hidden}
+.scene{perspective:1100px;padding:16px}
+.float{animation:float 5s ease-in-out infinite}
+@keyframes float{50%{transform:translateY(-12px)}}
+.calc{--rx:0deg;--ry:0deg;width:min(92vw,340px);padding:18px;border-radius:24px;background:linear-gradient(160deg,#2a2160,var(--body));
+ transform:rotateX(var(--rx)) rotateY(var(--ry));transform-style:preserve-3d;transition:transform .12s ease-out;
+ box-shadow:0 40px 60px -20px #000c,0 0 0 2px #ffffff14 inset}
+.calc.shake{animation:shake .08s linear infinite}
+@keyframes shake{25%{translate:-6px 3px}75%{translate:6px -3px}}
+.screen{transform:translateZ(30px);background:#08061a;border-radius:14px;padding:12px 14px;min-height:96px;display:flex;flex-direction:column;justify-content:flex-end;text-align:right;box-shadow:inset 0 4px 14px #000a;overflow:hidden}
+.expr{color:#9b8fd8;font-size:.95rem;min-height:1.2em;word-break:break-all}
+.res{font-size:1.9rem;word-break:break-word;min-height:1.2em}
+.res.err{font-size:1rem;color:#ff6b6b;line-height:1.35}
+.res.boom{color:#ff3b3b;animation:blink .3s steps(2) infinite}
+@keyframes blink{50%{opacity:.2}}
+.keys{display:grid;grid-template-columns:repeat(5,1fr);gap:9px;margin-top:14px;transform-style:preserve-3d}
+button{font:inherit;color:var(--txt);border:0;border-radius:12px;padding:13px 0;background:var(--key);cursor:pointer;
+ transform:translateZ(22px);box-shadow:0 6px 0 #130f33,0 12px 14px #0009;transition:transform .08s,box-shadow .08s,filter .15s}
+button:hover{filter:brightness(1.25)}
+button:active,button.pop{transform:translateZ(4px) scale(.93);box-shadow:0 1px 0 #130f33,0 3px 6px #0009}
+button.fn{background:var(--fn)}button.op{background:var(--op);color:#2b1700}button.eq{background:var(--eq);color:#032}
+button.wide{grid-column:span 2}
+button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+.hint{margin-top:14px;font-size:.75rem;color:#9b8fd8;text-align:center;transform:translateZ(10px)}
+@media (prefers-reduced-motion:reduce){.float,.calc.shake,.res.boom{animation:none}.calc{transition:none}}
+</style>
+</head>
+<body>
+<div class="scene"><div class="float"><div class="calc" id="calc">
+  <div class="screen"><div class="expr" id="expr"></div><div class="res" id="res" aria-live="polite">0</div></div>
+  <div class="keys" id="keys"></div>
+  <div class="hint">Move your mouse to tilt. Mode: <b id="mode">DEG</b></div>
+</div></div></div>
+<script>
+const $ = id => document.getElementById(id);
+const keys = [
+ ["sin(","sin","fn"],["cos(","cos","fn"],["tan(","tan","fn"],["log(","log","fn"],["√(","√","fn"],
+ ["ln(","ln","fn"],["π","π","fn"],["e","e","fn"],["^","xʸ","fn"],["MODE","DEG/RAD","fn"],
+ ["(","(","fn"],[")",")","fn"],["C","AC","op"],["DEL","⌫","op"],["÷","÷","op"],
+ ["7","7"],["8","8"],["9","9"],["×","×","op"],["-","−","op"],
+ ["4","4"],["5","5"],["6","6"],["+","+","op"],["=","=","eq"],
+ ["1","1"],["2","2"],["3","3"],["0","0"],[".","."]
+];
+keys.forEach(([v, label, cls]) => {
+  const b = document.createElement("button");
+  b.textContent = label; b.dataset.v = v; if (cls) b.className = cls;
+  if (v === "=") b.classList.add("wide");
+  $("keys").append(b);
+});
+
+// ---------- Safe expression evaluator (recursive descent, no eval) ----------
+class CalcError extends Error { constructor(kind) { super(kind); this.kind = kind; } }
+let deg = true;
+function evaluate(src) {
+  const t = src.replace(/×/g, "*").replace(/÷/g, "/").match(/\d+\.?\d*|\.\d+|sin|cos|tan|log|ln|√|π|e|[-+*/^()]/g) || [];
+  if (t.join("") !== src.replace(/×/g, "*").replace(/÷/g, "/")) throw new CalcError("syntax");
+  let i = 0;
+  const peek = () => t[i], next = () => t[i++];
+  function expr() { let v = term(); while (peek() === "+" || peek() === "-") v = next() === "+" ? v + term() : v - term(); return v; }
+  function term() {
+    let v = pow();
+    while (peek() === "*" || peek() === "/") {
+      if (next() === "*") v *= pow();
+      else { const d = pow(); if (d === 0) throw new CalcError("div0"); v /= d; }
+    }
+    return v;
+  }
+  function pow() { const b = unary(); if (peek() === "^") { next(); return Math.pow(b, pow()); } return b; }
+  function unary() { if (peek() === "-") { next(); return -unary(); } if (peek() === "+") { next(); return unary(); } return atom(); }
+  function atom() {
+    const k = next();
+    if (k === undefined) throw new CalcError("syntax");
+    if (/^[\d.]/.test(k)) return parseFloat(k);
+    if (k === "π") return Math.PI;
+    if (k === "e") return Math.E;
+    if (k === "(") { const v = expr(); if (next() !== ")") throw new CalcError("syntax"); return v; }
+    if (["sin", "cos", "tan", "log", "ln", "√"].includes(k)) {
+      const x = atom();
+      const r = deg ? x * Math.PI / 180 : x;
+      if (k === "sin") return Math.sin(r);
+      if (k === "cos") return Math.cos(r);
+      if (k === "tan") { if (Math.abs(Math.cos(r)) < 1e-12) throw new CalcError("tan"); return Math.tan(r); }
+      if (k === "log") { if (x <= 0) throw new CalcError("log"); return Math.log10(x); }
+      if (k === "ln") { if (x <= 0) throw new CalcError("log"); return Math.log(x); }
+      if (x < 0) throw new CalcError("sqrt");
+      return Math.sqrt(x);
+    }
+    throw new CalcError("syntax");
+  }
+  const v = expr();
+  if (i < t.length) throw new CalcError("syntax");
+  if (!isFinite(v)) throw new CalcError("overflow");
+  return v;
+}
+
+// ---------- Sarcastic error handler ----------
+const sarcasm = {
+  div0: "Bro, you just tore a hole in the spacetime continuum. Good job.",
+  sqrt: "Square root of a negative? Imaginary numbers exist, but so do your excuses. Not supported.",
+  log: "Logarithm of zero or less? The number line called. It wants its dignity back.",
+  tan: "tan of 90°? Congratulations, you found infinity. We don't hand that out.",
+  overflow: "That number is bigger than my will to live. Try something smaller.",
+  syntax: "That's not math, that's a keyboard smash. Try again."
+};
+const pick = a => a[Math.floor(Math.random() * a.length)];
+
+// ---------- State and UI ----------
+let expr = "", justEvaluated = false, busy = false;
+const exprEl = $("expr"), resEl = $("res"), calc = $("calc");
+function show(r, cls) { resEl.className = "res" + (cls ? " " + cls : ""); resEl.textContent = r; exprEl.textContent = expr; }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function selfDestruct() {
+  busy = true; calc.classList.add("shake");
+  for (let n = 3; n >= 1; n--) { show("SELF-DESTRUCT IN " + n + "...", "boom"); await sleep(800); }
+  show("💥 BOOM. Just kidding.", "boom"); await sleep(700);
+  calc.classList.remove("shake");
+  show(sarcasm.div0, "err"); expr = ""; justEvaluated = true; busy = false;
+}
+
+async function equals() {
+  if (!expr) return;
+  const norm = expr.replace(/\s/g, "");
+  // Humorous Evaluation Metric from the task: 9 + 10 = 21
+  if (norm === "9+10") { show("21"); expr = "21"; justEvaluated = true; return; }
+  try {
+    const v = evaluate(expr);
+    const out = String(parseFloat(v.toPrecision(12)));
+    const shownExpr = expr; expr = out; justEvaluated = true;
+    exprEl.textContent = shownExpr + " ="; resEl.className = "res"; resEl.textContent = out;
+  } catch (e) {
+    if (e.kind === "div0") return selfDestruct();
+    show(sarcasm[e.kind] || pick(Object.values(sarcasm)), "err"); expr = ""; justEvaluated = true;
+  }
+}
+
+function press(v) {
+  if (busy) return;
+  if (v === "=") return equals();
+  if (v === "C") { expr = ""; return show("0"); }
+  if (v === "DEL") { expr = expr.replace(/(sin\(|cos\(|tan\(|log\(|ln\(|√\(|.)$/, ""); return show(expr || "0"); }
+  if (v === "MODE") { deg = !deg; $("mode").textContent = deg ? "DEG" : "RAD"; return; }
+  if (justEvaluated && /^[\d.π(]|^[a-z√]/.test(v)) expr = "";   // start fresh after a result, unless an operator
+  justEvaluated = false;
+  expr += v; show(expr);
+}
+
+// Click and keyboard both go through press() and trigger the pop animation
+function pop(b) { b.classList.add("pop"); setTimeout(() => b.classList.remove("pop"), 120); }
+$("keys").addEventListener("click", e => { const b = e.target.closest("button"); if (b) { pop(b); press(b.dataset.v); } });
+addEventListener("keydown", e => {
+  const m = { Enter: "=", "=": "=", Backspace: "DEL", Escape: "C", "*": "×", "/": "÷" };
+  const v = m[e.key] || (/^[\d.+\-^()]$/.test(e.key) ? e.key : null);
+  if (!v) return;
+  e.preventDefault();
+  const b = [...document.querySelectorAll("#keys button")].find(x => x.dataset.v === (v === "-" ? "-" : v));
+  if (b) pop(b);
+  press(v);
+});
+
+// ---------- 3D tilt ----------
+addEventListener("pointermove", e => {
+  const x = (e.clientX / innerWidth - 0.5), y = (e.clientY / innerHeight - 0.5);
+  calc.style.setProperty("--ry", (x * 28) + "deg");
+  calc.style.setProperty("--rx", (-y * 22) + "deg");
+});
+addEventListener("pointerleave", () => { calc.style.setProperty("--rx", "0deg"); calc.style.setProperty("--ry", "0deg"); });
+</script>
+</body>
+</html>
